@@ -24,8 +24,8 @@ struct ADIOI_Fns_struct ADIO_LUSTRE_operations = {
     ADIOI_LUSTRE_WriteStrided, /* WriteStrided */
     ADIOI_GEN_Close, /* Close */
 #if defined(ROMIO_HAVE_WORKING_AIO) && !defined(CRAY_XT_LUSTRE)
-    ADIOI_GEN_IreadContig, /* IreadContig */
-    ADIOI_GEN_IwriteContig, /* IwriteContig */
+    ADIOI_LUSTRE_IreadContig, /* IreadContig */
+    ADIOI_LUSTRE_IwriteContig, /* IwriteContig */
 #else
     ADIOI_FAKE_IreadContig, /* IreadContig */
     ADIOI_FAKE_IwriteContig, /* IwriteContig */

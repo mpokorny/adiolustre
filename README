@@ -1,0 +1,4 @@
+Experimental changes to the ADIO Lustre code.
+
+This repo is based on the directory src/mpi/romio/adio/ad_lustre in the
+mpich2-1.5b1 tarball.

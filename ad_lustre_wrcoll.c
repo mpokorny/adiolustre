@@ -65,6 +65,8 @@ struct ExchAndWrite_RequestSeq {
   ADIO_Offset off;
   int hole;
   int error_code;
+
+  MPI_Win win;
 };
 #define ITER_N(offset, si, gs) ((((offset) - (si)[3]) % (si)[4]) / (gs))
 
@@ -1036,6 +1038,7 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
                                 int iter_offset, int iter_step,
                                 struct ExchAndWrite_RequestSeq *rseq)
 {
+  MPI_Info win_info;
   rseq->fd = fd;
   rseq->buf = buf;
   rseq->offset_list = offset_list;
@@ -1057,7 +1060,12 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
     ADIOI_MIN(striping_info[2], striping_info[1]) * striping_info[0];
   rseq->iter_step = iter_step;
 
-  rseq->write_buf = NULL;
+  MPI_Alloc_mem(striping_info[0], MPI_INFO_NULL, &(rseq->write_buf));
+  MPI_Info_create(&win_info);
+  MPI_Info_set(win_info, "no_locks", "true");
+  MPI_Win_create(rseq->write_buf, striping_info[0], 1, win_info,
+                 fd->comm, &(rseq->win));
+  MPI_Info_free(&win_info);
   rseq->recv_count = (int *) ADIOI_Malloc(nprocs * sizeof(int));
   rseq->recv_size = (int *) ADIOI_Malloc(nprocs * sizeof(int));
   rseq->send_size = (int *) ADIOI_Malloc(nprocs * sizeof(int));
@@ -1084,8 +1092,8 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
 static void finalize_exch_and_write(struct ExchAndWrite_RequestSeq *rseq)
 {
   int i;
-  if (rseq->write_buf)
-    ADIOI_Free(rseq->write_buf);
+  MPI_Win_free(&(rseq->write_buf));
+  MPI_Free_mem(rseq->write_buf);
   ADIOI_Free(rseq->recv_count);
   ADIOI_Free(rseq->recv_size);
   ADIOI_Free(rseq->send_size);
@@ -1153,14 +1161,6 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
   ADIOI_Assert(rseq->off == rseq->striping_info[6] ||
                ITER_N(rseq->off, rseq->striping_info, rseq->group_step_size) ==
                rseq->iter);
-
-  if (rseq->write_buf == NULL) {
-    for (i = 0; i < rseq->nprocs; i++)
-      if (rseq->others_req[i].count) {
-        rseq->write_buf = ADIOI_Malloc(rseq->striping_info[0]);
-        break;
-      }
-  }
 
   for (i = 0; i < rseq->nprocs; i++) {
     if (rseq->my_req[i].count &&

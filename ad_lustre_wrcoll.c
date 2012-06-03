@@ -168,7 +168,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 
     int i, filetype_is_contig, nprocs, myrank, do_collect = 0;
     int contig_access_count = 0, buftype_is_contig, interleave_count = 0;
-    int *count_my_req_per_proc, count_my_req_procs, count_others_req_procs;
     ADIO_Offset orig_fp, start_offset, end_offset, off, min_offset, max_offset;
     ADIO_Offset *offset_list = NULL, *st_offsets = NULL, *end_offsets = NULL;
     ADIO_Offset *len_list = NULL;
@@ -270,23 +269,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
      * located in which process
      */
     ADIOI_LUSTRE_Calc_my_req(fd, offset_list, len_list, contig_access_count,
-                             striping_info, nprocs,
-                             &count_my_req_procs,
-                             &count_my_req_per_proc, &my_req,
-                             &buf_idx);
-
-    /* based on everyone's my_req, calculate what requests of other processes
-     * will be accessed by this process.
-     * count_others_req_procs = number of processes whose requests (including
-     * this process itself) will be accessed by this process
-     * count_others_req_per_proc[i] indicates how many separate contiguous
-     * requests of proc. i will be accessed by this process.
-     */
-
-    ADIOI_Calc_others_req(fd, count_my_req_procs, count_my_req_per_proc,
-                          my_req, nprocs, myrank, &count_others_req_procs,
-                          &others_req);
-    ADIOI_Free(count_my_req_per_proc);
+                             striping_info, nprocs, &my_req, &buf_idx);
 
     /* exchange data and write in sizes of no more than stripe_size. */
     ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,

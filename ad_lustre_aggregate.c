@@ -170,18 +170,15 @@ int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off,
 void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset *offset_list,
                               ADIO_Offset *len_list, int contig_access_count,
                               ADIO_Offset *striping_info, int nprocs,
-                              int *count_my_req_procs_ptr,
-                              int **count_my_req_per_proc_ptr,
                               ADIOI_Access **my_req_ptr,
                               int ***buf_idx_ptr)
 {
-  int *count_my_req_per_proc, count_my_req_procs, **buf_idx;
+  int *count_my_req_per_proc, **buf_idx;
   int i, l, proc;
   ADIO_Offset avail_len, rem_len, curr_idx, off;
   ADIOI_Access *my_req;
 
-  *count_my_req_per_proc_ptr = (int *) ADIOI_Calloc(nprocs, sizeof(int));
-  count_my_req_per_proc = *count_my_req_per_proc_ptr;
+  count_my_req_per_proc = (int *) ADIOI_Calloc(nprocs, sizeof(int));
   /* count_my_req_per_proc[i] gives the no. of contig. requests of this
    * process in process i's file domain. calloc initializes to zero.
    */
@@ -238,7 +235,6 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset *offset_list,
   *my_req_ptr = (ADIOI_Access *) ADIOI_Malloc(nprocs * sizeof(ADIOI_Access));
   my_req = *my_req_ptr;
 
-  count_my_req_procs = 0;
   for (i = 0; i < nprocs; i++) {
     if (count_my_req_per_proc[i]) {
       my_req[i].offsets = (ADIO_Offset *)
@@ -246,7 +242,6 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset *offset_list,
                      sizeof(ADIO_Offset));
       my_req[i].lens = (int *) ADIOI_Malloc(count_my_req_per_proc[i] *
                                             sizeof(int));
-      count_my_req_procs++;
     }
     my_req[i].count = 0;	/* will be incremented where needed later */
   }
@@ -314,7 +309,7 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset *offset_list,
   }
 #endif
 
-  *count_my_req_procs_ptr = count_my_req_procs;
+  ADIOI_Free(count_my_req_per_proc);
   *buf_idx_ptr = buf_idx;
 }
 

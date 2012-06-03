@@ -1092,7 +1092,7 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
 static void finalize_exch_and_write(struct ExchAndWrite_RequestSeq *rseq)
 {
   int i;
-  MPI_Win_free(&(rseq->write_buf));
+  MPI_Win_free(&(rseq->win));
   MPI_Free_mem(rseq->write_buf);
   ADIOI_Free(rseq->recv_count);
   ADIOI_Free(rseq->recv_size);

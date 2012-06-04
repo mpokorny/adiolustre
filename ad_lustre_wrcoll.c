@@ -150,6 +150,7 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
                                      int *sent_to_proc,
                                      int *send_curr_offlen_ptr,
                                      int *recv_curr_offlen_ptr);
+static void complete_exch(struct ExchAndWrite_RequestSeq *rseq)
 static int poll_exch(struct ExchAndWrite_RequestSeq *rseq);
 static int poll_write(struct ExchAndWrite_RequestSeq *rseq);
 
@@ -895,34 +896,28 @@ static int ExchAndWrite_RequestSeq_wait(int count,
   MPI_Request *sub_requests = NULL;
   int num_sub_requests;
   int sub_requests_size = 0;
+  for (i = 0; i < count; ++i) {
+    if (rseqs[i]->is_aggregator && !rseqs[i]->error_code &&
+        rseqs[i]->phase == 1) {
+      rseqs[i]->error_code = MPI_Win_wait(rseqs[i]->win);
+      if (!rseqs[i]->error_code)
+        complete_exch(rseqs[i]);
+    }
+  }
   for (i = 0; i < count; ++i)
     sub_requests_size += rseqs[i]->num_sub_requests;
   if (sub_requests_size)
     sub_requests = ADIOI_Malloc(sub_requests_size * sizeof(MPI_Request));
-  while (!errcode && count > 0) {
-    num_sub_requests = 0;
-    for (i = 0; i < count; ++i)
-      num_sub_requests += rseqs[i]->num_sub_requests;
-    if (num_sub_requests > sub_requests_size) {
-      sub_requests = ADIOI_Realloc(sub_requests,
-                                   num_sub_requests * sizeof(MPI_Request));
-      sub_requests_size = num_sub_requests;
-    }
-    num_sub_requests = 0;
-    for (i = 0; i < count; ++i)
-      for (j = 0; j < rseqs[i]->num_sub_requests; ++j)
-        sub_requests[num_sub_requests++] = rseqs[i]->sub_requests[j];
-    errcode = MPI_Waitall(num_sub_requests, sub_requests, MPI_STATUSES_IGNORE);
-    for (i = 0; i < count; ++i)
-      rseqs[i]->num_sub_requests = 0;
-    j = 0;
-    for (i = 0; !errcode && i < count; ++i) {
-      errcode = ExchAndWrite_RequestSeq_test(rseqs[i], &flag);
-      if (!(errcode || flag))
-        rseqs[j++] = rseqs[i];
-    }
-    count = j;
-  }
+  num_sub_requests = 0;
+  for (i = 0; i < count; ++i)
+    for (j = 0; j < rseqs[i]->num_sub_requests; ++j)
+      sub_requests[num_sub_requests++] = rseqs[i]->sub_requests[j];
+  errcode = MPI_Waitall(num_sub_requests, sub_requests, MPI_STATUSES_IGNORE);
+  for (i = 0; i < count; ++i)
+    rseqs[i]->num_sub_requests = 0;
+  j = 0;
+  for (i = 0; !errcode && i < count; ++i)
+    errcode = ExchAndWrite_RequestSeq_test(rseqs[i], &flag);
   if (sub_requests)
     ADIOI_Free(sub_requests);
   return errcode;
@@ -933,6 +928,7 @@ static int ExchAndWrite_RequestSeq_waitsome(int count,
                                             struct ExchAndWrite_RequestSeq **rseqs,
   int *outcount)
 {
+  // FIXME
   int i, j, *indices = NULL;
   int flag, sub_outcount, errcode = MPI_SUCCESS;
   MPI_Request *sub_requests = NULL;
@@ -1172,6 +1168,7 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
     }
   }
   rseq->hole = rseq->fd->hints->fs_hints.lustre.ds_in_coll;
+  rseq->num_sub_requests = 0;
   if (is_aggregator)
     MPI_Win_post(rseq->fd_group, MPI_MODE_NOSTORE, rseq->win);
   MPI_Win_start(rseq->aggregator_group, 0, rseq->win);
@@ -1192,50 +1189,53 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
                                &(rseq->srt_num),
                                rseq->send_buf, &(rseq->error_code));
   MPI_Win_complete(rseq->win);
-  if (rseq->error_code) {
+  if (rseq->error_code)
     rseq->phase = 3;
-    rseq->num_sub_requests = 0;
-  }
   return rseq->error_code;
 }
 
-static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
+static void complete_exch(struct ExchAndWrite_RequestSeq *rseq)
 {
-  int exch_complete, flag, i;
+  int i;
   ADIO_Offset block_offset;
   int block_len;
 
-  ADIOI_Assert(rseq->phase == 1);
-  ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
-
-  if (!rseq->is_aggregator)
-    exch_complete = TRUE;
-  else
-    rseq->error_code = MPI_Win_test(rseq->win, &exch_complete);
-  if (rseq->error_code || exch_complete)
-    rseq->num_sub_requests = 0;
-  if (!rseq->error_code && exch_complete) {
-    for (i = 0; i < rseq->nprocs; i++) {
-      if (rseq->is_aggregator)
-        rseq->phase = 2;
-      if (rseq->send_buf[i]) {
-        ADIOI_Free(rseq->send_buf[i]);
-        rseq->send_buf[i] = NULL;
-      }
+  for (i = 0; i < rseq->nprocs; i++) {
+    if (rseq->is_aggregator)
+      rseq->phase = 2;
+    if (rseq->send_buf[i]) {
+      ADIOI_Free(rseq->send_buf[i]);
+      rseq->send_buf[i] = NULL;
     }
-    if (rseq->phase == 2) {
-      /* Although we have recognized the data according to OST index,
-       * a read-modify-write will be done if there is a hole between
-       * the data. For example: if blocksize=60, xfersize=30 and
-       * stripe_size=100, then rank0 will collect data [0, 30] and
-       * [60, 90] then write. There is a hole in [30, 60], which will
-       * cause a read-modify-write in [0, 90].
-       *
-       * To reduce its impact on the performance, we can disable data
-       * sieving by hint "ds_in_coll".
-       */
-      /* check the hint for data sieving */
-      if (rseq->fd->hints->fs_hints.lustre.ds_in_coll == ADIOI_HINT_ENABLE) {
+  }
+  if (rseq->phase == 2) {
+    /* Although we have recognized the data according to OST index,
+     * a read-modify-write will be done if there is a hole between
+     * the data. For example: if blocksize=60, xfersize=30 and
+     * stripe_size=100, then rank0 will collect data [0, 30] and
+     * [60, 90] then write. There is a hole in [30, 60], which will
+     * cause a read-modify-write in [0, 90].
+     *
+     * To reduce its impact on the performance, we can disable data
+     * sieving by hint "ds_in_coll".
+     */
+    /* check the hint for data sieving */
+    if (rseq->fd->hints->fs_hints.lustre.ds_in_coll == ADIOI_HINT_ENABLE) {
+#ifdef USE_IWRITE_FUNCTIONS
+      rseq->num_sub_requests = 1;
+      ADIO_IwriteContig(rseq->fd, rseq->write_buf, rseq->real_size,
+                        MPI_BYTE, ADIO_EXPLICIT_OFFSET, rseq->off,
+                        &(rseq->sub_requests[0]), &(rseq->error_code));
+#else /* !USE_IWRITE_FUNCTIONS */
+      rseq->phase = 3;
+      ADIO_WriteContig(rseq->fd, rseq->write_buf, rseq->real_size,
+                       MPI_BYTE, ADIO_EXPLICIT_OFFSET, rseq->off,
+                       MPI_STATUS_IGNORE, &(rseq->error_code));
+#endif /* USE_IWRITE_FUNCTIONS */
+    } else {
+      /* if there is no hole, write data in one time;
+       * otherwise, write data in several times */
+      if (!rseq->hole) {
 #ifdef USE_IWRITE_FUNCTIONS
         rseq->num_sub_requests = 1;
         ADIO_IwriteContig(rseq->fd, rseq->write_buf, rseq->real_size,
@@ -1248,67 +1248,66 @@ static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
                          MPI_STATUS_IGNORE, &(rseq->error_code));
 #endif /* USE_IWRITE_FUNCTIONS */
       } else {
-        /* if there is no hole, write data in one time;
-         * otherwise, write data in several times */
-        if (!rseq->hole) {
-#ifdef USE_IWRITE_FUNCTIONS
-          rseq->num_sub_requests = 1;
-          ADIO_IwriteContig(rseq->fd, rseq->write_buf, rseq->real_size,
-                            MPI_BYTE, ADIO_EXPLICIT_OFFSET, rseq->off,
-                            &(rseq->sub_requests[0]), &(rseq->error_code));
-#else /* !USE_IWRITE_FUNCTIONS */
-          rseq->phase = 3;
-          ADIO_WriteContig(rseq->fd, rseq->write_buf, rseq->real_size,
-                           MPI_BYTE, ADIO_EXPLICIT_OFFSET, rseq->off,
-                           MPI_STATUS_IGNORE, &(rseq->error_code));
-#endif /* USE_IWRITE_FUNCTIONS */
-        } else {
-          // Don't do async io in this case. TODO: maybe
-          // allow a sequence of async ios, if the number of
-          // blocks is small enough.
-          rseq->phase = 3;
-          block_offset = -1;
-          block_len = 0;
-          for (i = 0; i < rseq->srt_num; ++i) {
-            if (rseq->srt_off[i] < rseq->off + rseq->real_size &&
-                rseq->srt_off[i] >= rseq->off) {
-              if (block_offset == -1) {
+        // Don't do async io in this case. TODO: maybe
+        // allow a sequence of async ios, if the number of
+        // blocks is small enough.
+        rseq->phase = 3;
+        block_offset = -1;
+        block_len = 0;
+        for (i = 0; i < rseq->srt_num; ++i) {
+          if (rseq->srt_off[i] < rseq->off + rseq->real_size &&
+              rseq->srt_off[i] >= rseq->off) {
+            if (block_offset == -1) {
+              block_offset = rseq->srt_off[i];
+              block_len = rseq->srt_len[i];
+            } else {
+              if (rseq->srt_off[i] == block_offset + block_len) {
+                block_len += rseq->srt_len[i];
+              } else {
+                ADIO_WriteContig(rseq->fd,
+                                 rseq->write_buf + block_offset - rseq->off,
+                                 block_len,
+                                 MPI_BYTE, ADIO_EXPLICIT_OFFSET,
+                                 block_offset, MPI_STATUS_IGNORE,
+                                 &(rseq->error_code));
+                if (rseq->error_code != MPI_SUCCESS) {
+                  block_offset = -1;
+                  break;
+                }
                 block_offset = rseq->srt_off[i];
                 block_len = rseq->srt_len[i];
-              } else {
-                if (rseq->srt_off[i] == block_offset + block_len) {
-                  block_len += rseq->srt_len[i];
-                } else {
-                  ADIO_WriteContig(rseq->fd,
-                                   rseq->write_buf + block_offset - rseq->off,
-                                   block_len,
-                                   MPI_BYTE, ADIO_EXPLICIT_OFFSET,
-                                   block_offset, MPI_STATUS_IGNORE,
-                                   &(rseq->error_code));
-                  if (rseq->error_code != MPI_SUCCESS) {
-                    block_offset = -1;
-                    break;
-                  }
-                  block_offset = rseq->srt_off[i];
-                  block_len = rseq->srt_len[i];
-                }
               }
             }
           }
-          if (block_offset != -1) {
-            ADIO_WriteContig(rseq->fd,
-                             rseq->write_buf + block_offset - rseq->off,
-                             block_len,
-                             MPI_BYTE, ADIO_EXPLICIT_OFFSET,
-                             block_offset, MPI_STATUS_IGNORE,
-                             &(rseq->error_code));
-          }
+        }
+        if (block_offset != -1) {
+          ADIO_WriteContig(rseq->fd,
+                           rseq->write_buf + block_offset - rseq->off,
+                           block_len,
+                           MPI_BYTE, ADIO_EXPLICIT_OFFSET,
+                           block_offset, MPI_STATUS_IGNORE,
+                           &(rseq->error_code));
         }
       }
     }
-    else
-      rseq->phase = 3;
   }
+  else
+    rseq->phase = 3;
+}
+
+static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
+{
+  int exch_complete;
+
+  ADIOI_Assert(rseq->phase == 1);
+  ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
+
+  if (!rseq->is_aggregator)
+    exch_complete = TRUE;
+  else
+    rseq->error_code = MPI_Win_test(rseq->win, &exch_complete);
+  if (!rseq->error_code && exch_complete)
+    complete_exch(rseq);
   return rseq->error_code;
 }
 

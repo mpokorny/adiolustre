@@ -53,7 +53,7 @@ struct ExchAndWrite_RequestSeq {
   int *recv_count, *recv_size, *send_size;
   int *recv_start_pos;
   int *this_buf_idx, *send_buf_idx, *curr_to_proc, *done_to_proc;
-  ADIO_Offset *srt_off;
+  ADIO_Offset *srt_off, *send_disp;
   int *srt_len, srt_num;
   int num_sub_requests;
   MPI_Request *sub_requests;
@@ -67,6 +67,9 @@ struct ExchAndWrite_RequestSeq {
   int error_code;
 
   MPI_Win win;
+  int is_aggregator;
+  MPI_Group aggregator_group;
+  MPI_Group fd_group;
 };
 #define ITER_N(offset, si, gs) ((((offset) - (si)[3]) % (si)[4]) / (gs))
 
@@ -74,6 +77,7 @@ struct ExchAndWrite_RequestSeq {
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, void *buf,
 					MPI_Datatype datatype, int nprocs,
 					int myrank,
+                         int count_others_req_procs,
 					ADIOI_Access *others_req,
 					ADIOI_Access *my_req,
 					ADIO_Offset *offset_list,
@@ -86,18 +90,20 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, void *buf,
 					  char **send_buf,
 					  ADIO_Offset *offset_list,
 					  ADIO_Offset *len_list, int *send_size,
+                           ADIO_Offset *send_disp,
 					  MPI_Request *requests,
 					  int *sent_to_proc, int nprocs,
 					  int myrank, int contig_access_count,
 					  ADIO_Offset *striping_info,
 					  int *send_buf_idx, int *curr_to_proc,
 					  int *done_to_proc, int iter,
-					  MPI_Aint buftype_extent);
+                           MPI_Aint buftype_extent, MPI_Win win);
 static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
-					 char *write_buf,
+                          char *write_buf, MPI_Win win,
 					 ADIOI_Flatlist_node *flat_buf,
 					 ADIO_Offset *offset_list,
 					 ADIO_Offset *len_list, int *send_size,
+                          ADIO_Offset *send_disp,
 					 int *recv_size, ADIO_Offset off,
 					 int size, int *count,
 					 int *start_pos,
@@ -110,7 +116,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
 					 int *done_to_proc, int *hole, int iter,
                           MPI_Aint buftype_extent, int *buf_idx,
 					 ADIO_Offset **srt_off, int **srt_len, int *srt_num,
-                          MPI_Request *requests, int *num_requests,
                           char **send_buf, int *error_code);
 void ADIOI_Heap_merge(ADIOI_Access *others_req, int *count,
                       ADIO_Offset *srt_off, int *srt_len, int *start_pos,
@@ -129,6 +134,8 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
                                 ADIO_Offset *offset_list,
                                 ADIO_Offset *len_list,
                                 ADIO_Offset *striping_info,
+                                int is_aggregator, MPI_Group aggregator_group,
+                                MPI_Group fd_group,
                                 ADIO_Offset *stripe_off_list,
                                 ADIO_Offset end_loc,
                                 ADIOI_Access *others_req, ADIOI_Access *my_req,
@@ -290,6 +297,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 
     /* exchange data and write in sizes of no more than stripe_size. */
     ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,
+                                count_others_req_procs,
                                 others_req, my_req, offset_list, len_list,
                                 contig_access_count, striping_info,
                                 buf_idx, error_code);
@@ -381,13 +389,15 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
  * code is created and returned in error_code.
  */
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, void *buf,
-					MPI_Datatype datatype, int nprocs,
-					int myrank, ADIOI_Access *others_req,
+                                        MPI_Datatype datatype, int nprocs,
+                                        int myrank, int count_others_req_procs,
+                                        ADIOI_Access *others_req,
                                         ADIOI_Access *my_req,
-					ADIO_Offset *offset_list,
+                                        ADIO_Offset *offset_list,
                                         ADIO_Offset *len_list,
-					int contig_access_count,
-                         ADIO_Offset *striping_info, int **buf_idx,
+                                        int contig_access_count,
+                                        ADIO_Offset *striping_info,
+                                        int **buf_idx,
                                         int *error_code)
 {
     /* Send data to appropriate processes and write in sizes of no more
@@ -419,6 +429,10 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, void *buf,
 
     struct ExchAndWrite_RequestSeq *rseqs, **active_rseqs;
     int num_active;
+    int is_aggregator = (count_others_req_procs > 0);
+    MPI_Comm aggregator_comm;
+    MPI_Group aggregator_group = MPI_GROUP_NULL;
+    MPI_Group fd_group;
 
     *error_code = MPI_SUCCESS;	/* changed below if error */
     /* only I/O errors are currently reported */
@@ -485,8 +499,14 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, void *buf,
     }
     MPI_Type_extent(datatype, &buftype_extent);
 
+    MPI_Comm_group(fd->comm, &fd_group);
+    MPI_Comm_split(fd->comm, is_aggregator ? 1 : MPI_UNDEFINED, 0,
+                   &aggregator_comm);
+    if (is_aggregator)
+      MPI_Comm_group(aggregator_comm, &aggregator_group);
     for (i = 0; i < num_rseqs; ++i)
       init_exch_and_write(fd, buf, offset_list, len_list, striping_info,
+                          is_aggregator, aggregator_group, fd_group,
                           off_list, end_loc, others_req, my_req, flat_buf,
                           buf_idx, nprocs, myrank, buftype_is_contig,
                           contig_access_count, buftype_extent,
@@ -551,6 +571,11 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, void *buf,
 over:
     for (i = 0; i < num_rseqs; ++i)
       finalize_exch_and_write(&(rseqs[i]));
+    MPI_Group_free(&fd_group);
+    if (is_aggregator) {
+      MPI_Group_free(&aggregator_group);
+      MPI_Comm_free(&aggregator_comm);
+    }
     ADIOI_Free(sent_to_proc);
     ADIOI_Free(recv_curr_offlen_ptr);
     ADIOI_Free(send_curr_offlen_ptr);
@@ -563,10 +588,11 @@ over:
  * in the case of error.
  */
 static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
-					 char *write_buf,
+                          char *write_buf, MPI_Win win,
 					 ADIOI_Flatlist_node *flat_buf,
 					 ADIO_Offset *offset_list,
 					 ADIO_Offset *len_list, int *send_size,
+                          ADIO_Offset *send_disp,
 					 int *recv_size, ADIO_Offset off,
 					 int size, int *count,
 					 int *start_pos,
@@ -581,11 +607,9 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
                           MPI_Aint buftype_extent,
 					 int *buf_idx,
                           ADIO_Offset **srt_off, int **srt_len, int *srt_num,
-                          MPI_Request *requests, int *num_requests,
                           char **send_buf, int *error_code)
 {
     int i, j, nprocs_recv, nprocs_send, err;
-    MPI_Datatype *recv_types;
     int sum_recv;
     int data_sieving = *hole;
     static char myname[] = "ADIOI_W_EXCHANGE_DATA";
@@ -595,23 +619,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
     for (i = 0; i < nprocs; i++)
 	if (recv_size[i])
 	    nprocs_recv++;
-
-    recv_types = (MPI_Datatype *) ADIOI_Malloc((nprocs_recv + 1) *
-					       sizeof(MPI_Datatype));
-    /* +1 to avoid a 0-size malloc */
-
-    j = 0;
-    for (i = 0; i < nprocs; i++) {
-	if (recv_size[i]) {
-	    MPI_Type_hindexed(count[i],
-			      &(others_req[i].lens[start_pos[i]]),
-			      &(others_req[i].mem_ptrs[start_pos[i]]),
-			      MPI_BYTE, recv_types + j);
-	    /* absolute displacements; use MPI_BOTTOM in recv */
-	    MPI_Type_commit(recv_types + j);
-	    j++;
-	}
-    }
 
     /* To avoid a read-modify-write,
      * check if there are holes in the data to be written.
@@ -666,7 +673,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
                                                myname, __LINE__,
                                                MPI_ERR_IO,
                                                "**ioRMWrdwr", 0);
-            ADIOI_Free(recv_types);
             return;
         }
         // --END ERROR HANDLING--
@@ -677,38 +683,18 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
 	if (send_size[i])
 	    nprocs_send++;
 
-    if (fd->atomicity) {
-	/* bug fix from Wei-keng Liao and Kenin Coloma */
-      *num_requests = nprocs_send;
-    } else {
-      *num_requests = nprocs_send + nprocs_recv;
-
-	/* post receives */
-	j = 0;
-	for (i = 0; i < nprocs; i++) {
-	    if (recv_size[i]) {
-		MPI_Irecv(MPI_BOTTOM, 1, recv_types[j], i,
-                    myrank + i + 100 * iter, fd->comm,
-                    requests + nprocs_send + j);
-		j++;
-	    }
-	}
-    }
-
     /* post sends.
      * if buftype_is_contig, data can be directly sent from
      * user buf at location given by buf_idx. else use send_buf.
      */
     if (buftype_is_contig) {
-	j = 0;
 	for (i = 0; i < nprocs; i++)
-	    if (send_size[i]) {
-                ADIOI_Assert(buf_idx[i] != -1);
-		MPI_Isend(((char *) buf) + buf_idx[i], send_size[i],
-                    MPI_BYTE, i, myrank + i + 100 * iter, fd->comm,
-                    requests + j);
-		j++;
-	    }
+       if (send_size[i]) {
+         ADIOI_Assert(buf_idx[i] != -1);
+         MPI_Put(((char *) buf) + buf_idx[i], send_size[i], MPI_BYTE,
+                 i, send_disp[i], send_size[i], MPI_BYTE,
+                 rseq->win);
+       }
     } else
         if (nprocs_send) {
 	/* buftype is not contig */
@@ -717,29 +703,13 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, void *buf,
 		send_buf[i] = (char *) ADIOI_Malloc(send_size[i]);
 
 	ADIOI_LUSTRE_Fill_send_buffer(fd, buf, flat_buf, send_buf, offset_list,
-                                   len_list, send_size, requests,
+                                   len_list, send_size, send_disp, requests,
                                    sent_to_proc, nprocs, myrank,
                                    contig_access_count, striping_info,
                                    send_buf_idx, curr_to_proc, done_to_proc,
-                                   iter, buftype_extent);
+                                   iter, buftype_extent, win);
 	/* the send is done in ADIOI_Fill_send_buffer */
     }
-
-	/* bug fix from Wei-keng Liao and Kenin Coloma */
-    if (fd->atomicity) {
-	j = 0;
-	for (i = 0; i < nprocs; i++) {
-	    if (recv_size[i]) {
-		MPI_Recv(MPI_BOTTOM, 1, recv_types[j], i,
-                   myrank + i + 100 * iter, fd->comm, MPI_STATUS_IGNORE);
-		j++;
-	    }
-	}
-    }
-
-    for (i = 0; i < nprocs_recv; i++)
-        MPI_Type_free(recv_types + i);
-    ADIOI_Free(recv_types);
 }
 
 #define ADIOI_BUF_INCR \
@@ -795,6 +765,7 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, void *buf,
 					  char **send_buf,
 					  ADIO_Offset *offset_list,
 					  ADIO_Offset *len_list, int *send_size,
+                           ADIO_Offset *send_disp,
 					  MPI_Request *requests,
 					  int *sent_to_proc, int nprocs,
 					  int myrank,
@@ -803,11 +774,11 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, void *buf,
 					  int *send_buf_idx,
 					  int *curr_to_proc,
 					  int *done_to_proc, int iter,
-					  MPI_Aint buftype_extent)
+                           MPI_Aint buftype_extent, MPI_Win win)
 {
     /* this function is only called if buftype is not contig */
     int i, p, flat_buf_idx, size;
-    int flat_buf_sz, buf_incr, size_in_buf, jj, n_buftypes;
+    int flat_buf_sz, buf_incr, size_in_buf, n_buftypes;
     ADIO_Offset off, len, rem_len, user_buf_idx;
 
     /* curr_to_proc[p] = amount of data sent to proc. p that has already
@@ -822,7 +793,6 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, void *buf,
 	send_buf_idx[i] = curr_to_proc[i] = 0;
 	done_to_proc[i] = sent_to_proc[i];
     }
-    jj = 0;
 
     user_buf_idx = flat_buf->indices[0];
     flat_buf_idx = 0;
@@ -855,24 +825,20 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, void *buf,
                buf_incr = done_to_proc[p] - curr_to_proc[p];
                ADIOI_BUF_INCR
                  ADIOI_Assert((curr_to_proc[p] + len - done_to_proc[p]) == (unsigned)(curr_to_proc[p] + len - done_to_proc[p]));
-               buf_incr = (int) (curr_to_proc[p] + len -
-                                 done_to_proc[p]);
+               buf_incr = (int) (curr_to_proc[p] + len - done_to_proc[p]);
                ADIOI_Assert((done_to_proc[p] + size) == (unsigned)(done_to_proc[p] + size));
                curr_to_proc[p] = done_to_proc[p] + size;
                ADIOI_BUF_COPY
                  } else {
-               size = (int) ADIOI_MIN(len, send_size[p] -
-                                      send_buf_idx[p]);
+               size = (int) ADIOI_MIN(len, send_size[p] - send_buf_idx[p]);
                buf_incr = (int) len;
                ADIOI_Assert((curr_to_proc[p] + size) == (unsigned)((ADIO_Offset)curr_to_proc[p] + size));
                curr_to_proc[p] += size;
                ADIOI_BUF_COPY
                  }
              if (send_buf_idx[p] == send_size[p]) {
-               MPI_Isend(send_buf[p], send_size[p], MPI_BYTE, p,
-                         myrank + p + 100 * iter, fd->comm,
-                         requests + jj);
-               jj++;
+               MPI_Put(send_buf[p], send_size[p], MPI_BYTE, p,
+                       send_disp[p], send_size[p], MPI_BYTE, win);
              }
            } else {
              ADIOI_Assert((curr_to_proc[p] + len) == (unsigned)((ADIO_Offset)curr_to_proc[p] + len));
@@ -1028,6 +994,8 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
                                 ADIO_Offset *offset_list,
                                 ADIO_Offset *len_list,
                                 ADIO_Offset *striping_info,
+                                int is_aggregator, MPI_Group aggregator_group,
+                                MPI_Group fd_group,
                                 ADIO_Offset *stripe_off_list,
                                 ADIO_Offset end_loc,
                                 ADIOI_Access *others_req, ADIOI_Access *my_req,
@@ -1060,15 +1028,10 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
     ADIOI_MIN(striping_info[2], striping_info[1]) * striping_info[0];
   rseq->iter_step = iter_step;
 
-  MPI_Alloc_mem(striping_info[0], MPI_INFO_NULL, &(rseq->write_buf));
-  MPI_Info_create(&win_info);
-  MPI_Info_set(win_info, "no_locks", "true");
-  MPI_Win_create(rseq->write_buf, striping_info[0], 1, win_info,
-                 fd->comm, &(rseq->win));
-  MPI_Info_free(&win_info);
   rseq->recv_count = (int *) ADIOI_Malloc(nprocs * sizeof(int));
   rseq->recv_size = (int *) ADIOI_Malloc(nprocs * sizeof(int));
   rseq->send_size = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+  rseq->send_disp = (MPI_Aint *) ADIOI_Malloc(nprocs * sizeof(MPI_Aint));
   rseq->recv_start_pos = (int *) ADIOI_Malloc(nprocs * sizeof (int));
   rseq->this_buf_idx = (int *) ADIOI_Malloc(nprocs * sizeof(int));
   rseq->send_buf_idx = (int *) ADIOI_Malloc(nprocs * sizeof(int));
@@ -1087,6 +1050,16 @@ static void init_exch_and_write(ADIO_File fd, void *buf,
   rseq->real_size = 0;
   rseq->phase = 0;
   rseq->hole = 0;
+
+  MPI_Alloc_mem(striping_info[0], MPI_INFO_NULL, &(rseq->write_buf));
+  MPI_Info_create(&win_info);
+  MPI_Info_set(win_info, "no_locks", "true");
+  MPI_Win_create(rseq->write_buf, striping_info[0], 1, win_info,
+                 fd->comm, &(rseq->win));
+  MPI_Info_free(&win_info);
+  rseq->is_aggregator = is_aggregator;
+  rseq->aggregator_group = aggregator_group;
+  rseq->fd_group = fd_group;
 }
 
 static void finalize_exch_and_write(struct ExchAndWrite_RequestSeq *rseq)
@@ -1097,6 +1070,7 @@ static void finalize_exch_and_write(struct ExchAndWrite_RequestSeq *rseq)
   ADIOI_Free(rseq->recv_count);
   ADIOI_Free(rseq->recv_size);
   ADIOI_Free(rseq->send_size);
+  ADIOI_Free(rseq->send_disp);
   ADIOI_Free(rseq->recv_start_pos);
   ADIOI_Free(rseq->this_buf_idx);
   ADIOI_Free(rseq->send_buf_idx);
@@ -1155,8 +1129,10 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
   */
 
   /* first calculate what should be communicated */
-  for (i = 0; i < rseq->nprocs; i++)
+  for (i = 0; i < rseq->nprocs; i++) {
     rseq->recv_count[i] = rseq->recv_size[i] = rseq->send_size[i] = 0;
+    rseq->send_disp[i] = -1;
+  }
 
   ADIOI_Assert(rseq->off == rseq->striping_info[6] ||
                ITER_N(rseq->off, rseq->striping_info, rseq->group_step_size) ==
@@ -1171,6 +1147,8 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
         if (ITER_N(send_off, rseq->striping_info, rseq->group_step_size) ==
             rseq->iter) {
           rseq->send_size[i] += rseq->my_req[i].lens[j];
+          if (rseq->send_disp[i] == -1)
+            rseq->send_disp[i] = send_off % stripe_size;
         } else {
           break;
         }
@@ -1185,11 +1163,6 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
         if (ITER_N(req_off, rseq->striping_info, rseq->group_step_size) ==
             rseq->iter) {
           rseq->recv_count[i]++;
-          ADIOI_Assert(req_off - rseq->off < stripe_size);
-          ADIOI_Assert((((ADIO_Offset)(MPIR_Upint)rseq->write_buf)+req_off-rseq->off) ==
-                       (ADIO_Offset)(MPIR_Upint)(rseq->write_buf+req_off-rseq->off));
-          MPI_Address(rseq->write_buf + req_off - rseq->off,
-                      &(rseq->others_req[i].mem_ptrs[j]));
           rseq->recv_size[i] += rseq->others_req[i].lens[j];
         } else {
           break;
@@ -1199,9 +1172,13 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
     }
   }
   rseq->hole = rseq->fd->hints->fs_hints.lustre.ds_in_coll;
+  if (is_aggregator)
+    MPI_Win_post(rseq->fd_group, MPI_MODE_NOSTORE, rseq->win);
+  MPI_Win_start(rseq->aggregator_group, 0, rseq->win);
   ADIOI_LUSTRE_W_Exchange_data(rseq->fd, rseq->buf, rseq->write_buf,
-                               rseq->flat_buf, rseq->offset_list,
+                               rseq->win, rseq->flat_buf, rseq->offset_list,
                                rseq->len_list, rseq->send_size,
+                               rseq->send_disp,
                                rseq->recv_size, rseq->off, rseq->real_size,
                                rseq->recv_count, rseq->recv_start_pos,
                                sent_to_proc, rseq->nprocs, rseq->myrank,
@@ -1213,9 +1190,9 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
                                rseq->buftype_extent, rseq->this_buf_idx,
                                &(rseq->srt_off), &(rseq->srt_len),
                                &(rseq->srt_num),
-                               rseq->sub_requests, &(rseq->num_sub_requests),
                                rseq->send_buf, &(rseq->error_code));
-  if (rseq->error_code || rseq->num_sub_requests == 0) {
+  MPI_Win_complete(rseq->win);
+  if (rseq->error_code) {
     rseq->phase = 3;
     rseq->num_sub_requests = 0;
   }
@@ -1231,16 +1208,15 @@ static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
   ADIOI_Assert(rseq->phase == 1);
   ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
 
-  if (rseq->num_sub_requests == 0)
+  if (!rseq->is_aggregator)
     exch_complete = TRUE;
   else
-    rseq->error_code = MPI_Testall(rseq->num_sub_requests, rseq->sub_requests,
-                                   &exch_complete, MPI_STATUSES_IGNORE);
+    rseq->error_code = MPI_Win_test(rseq->win, &exch_complete);
   if (rseq->error_code || exch_complete)
     rseq->num_sub_requests = 0;
   if (!rseq->error_code && exch_complete) {
     for (i = 0; i < rseq->nprocs; i++) {
-      if (rseq->recv_count[i])
+      if (rseq->is_aggregator)
         rseq->phase = 2;
       if (rseq->send_buf[i]) {
         ADIOI_Free(rseq->send_buf[i]);

@@ -1215,7 +1215,7 @@ static int start_next_exch_and_write(struct ExchAndWrite_RequestSeq *rseq,
                                &(rseq->srt_num),
                                rseq->sub_requests, &(rseq->num_sub_requests),
                                rseq->send_buf, &(rseq->error_code));
-  if (rseq->error_code || rseq->num_sub_requests == 0) {
+  if (rseq->error_code) {
     rseq->phase = 3;
     rseq->num_sub_requests = 0;
   }

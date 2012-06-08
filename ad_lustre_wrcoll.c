@@ -1232,7 +1232,7 @@ static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
   ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
 
   if (rseq->num_sub_requests == 0)
-    exch_complete = TRUE;
+    exch_complete = 1;
   else
     rseq->error_code = MPI_Testall(rseq->num_sub_requests, rseq->sub_requests,
                                    &exch_complete, MPI_STATUSES_IGNORE);
@@ -1344,7 +1344,7 @@ static int poll_write(struct ExchAndWrite_RequestSeq *rseq)
   ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
 
   if (rseq->num_sub_requests == 0)
-    write_complete = TRUE;
+    write_complete = 1;
   else
     rseq->error_code = MPI_Testall(rseq->num_sub_requests, rseq->sub_requests,
                                    &write_complete, MPI_STATUSES_IGNORE);

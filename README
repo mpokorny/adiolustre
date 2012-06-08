@@ -2,3 +2,7 @@ Experimental changes to the ADIO Lustre code.
 
 This repo is based on the directory src/mpi/romio/adio/ad_lustre in the
 mpich2-1.5b1 tarball.
+
+Makefile.mk is from MPICH2; Makefile.in, from MVAPICH2. Not sure that
+Makefile.mk is actually used by the MPICH2 build process, but
+Makefile.in certainly is used by the MVAPICH2 build process.

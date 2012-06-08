@@ -1303,7 +1303,7 @@ static int poll_exch(struct ExchAndWrite_RequestSeq *rseq)
   ADIOI_Assert(rseq->error_code == MPI_SUCCESS);
 
   if (!rseq->is_aggregator)
-    exch_complete = TRUE;
+    exch_complete = 1;
   else
     rseq->error_code = MPI_Win_test(rseq->win, &exch_complete);
   if (!rseq->error_code && exch_complete)

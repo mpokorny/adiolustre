@@ -41,7 +41,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 	ADIO_Offset *len_list = NULL;
 	ADIO_Offset *striping_info = NULL;
 	int old_error, tmp_error;
-	int *pes = NULL;
 	char *value;
 	int info_flag, coll_bufsize, num_buffered_stripes;
 	int avail_cb_nodes;
@@ -136,11 +135,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 		return;
 	}
 
-	/* compute rank-to-pe mapping */
-	pes = ADIOI_Malloc(nprocs * sizeof(int));
-	pes[myrank] = shmem_my_pe();
-	MPI_Allgather(MPI_IN_PLACE, 1, MPI_INT, pes, 1, MPI_INT, fd->comm);
-
 	/* get collective buffer size */
 	value = (char *) ADIOI_Malloc((MPI_MAX_INFO_VAL+1)*sizeof(char));
 	ADIOI_Info_get(fd->info, "cb_buffer_size", MPI_MAX_INFO_VAL, value,
@@ -150,7 +144,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 
 	/* Get Lustre hints information */
 	ADIOI_LUSTRE_Get_striping_info(fd, &striping_info, 1, min_offset,
-	                               max_offset, pes);
+	                               max_offset);
 	avail_cb_nodes = striping_info[2];
 
 	num_buffered_stripes = coll_bufsize / striping_info[0];
@@ -182,7 +176,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 	                         count, &req_info, &req_info_count);
 
 	/* exchange data and write in sizes of no more than stripe_size. */
-	ADIOI_LUSTRE_Exch_and_write(fd, pes[myrank], req_info, req_info_count,
+	ADIOI_LUSTRE_Exch_and_write(fd, myrank, req_info, req_info_count,
 	                            striping_info, num_buffered_stripes,
 	                            collective_buffers, locks, mod_flags,
 	                            error_code);
@@ -237,8 +231,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 	for (i = 0; i < avail_cb_nodes; ++i)
 		LUSTRE_shfree(mod_flags[i]);
 	ADIOI_Free(mod_flags);
-
-	ADIOI_Free(pes);
 
 	ADIOI_Free(req_info);
 

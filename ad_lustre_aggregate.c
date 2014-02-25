@@ -16,7 +16,7 @@
 void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd,
                                     ADIO_Offset **striping_info_ptr,
                                     int mode, ADIO_Offset min_offset,
-                                    ADIO_Offset max_offset, int *pes)
+                                    ADIO_Offset max_offset)
 {
 	ADIO_Offset *striping_info = NULL;
 	/* get striping information:
@@ -124,7 +124,7 @@ void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd,
 	striping_info[5] = min_stripe_offset % avail_cb_nodes;
 	striping_info[6] = max_offset;
 	for (i = 0; i < avail_cb_nodes; ++i)
-		striping_info[7 + i] = pes[fd->hints->ranklist[i]];
+		striping_info[7 + i] = fd->hints->ranklist[i];
 }
 
 int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off,

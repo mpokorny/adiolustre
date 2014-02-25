@@ -9,6 +9,7 @@
  */
 
 #include "ad_lustre.h"
+#include <shmem.h>
 
 struct ADIOI_Fns_struct ADIO_LUSTRE_operations = {
     ADIOI_LUSTRE_Open, /* Open */
@@ -41,3 +42,26 @@ struct ADIOI_Fns_struct ADIO_LUSTRE_operations = {
     ADIOI_GEN_Delete, /* Delete */
     ADIOI_GEN_Feature, /* Features */
 };
+
+void *LUSTRE_shmalloc_fn(size_t size, int lineno, const char *fname)
+{
+    void *new;
+    new = shmalloc(size);
+    if (!new) {
+	    fprintf(stderr, "Out of symmetric heap memory in file %s, line %d\n",
+                fname, lineno);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    DBG_FPRINTF(stderr, "LUSTRE_shmalloc %s:<%d> %p (%#zX)\n", fname, lineno, new, size);
+    return new;
+}
+
+void LUSTRE_shfree_fn(void *ptr, int lineno, const char *fname)
+{
+    DBG_FPRINTF(stderr, "LUSTRE_shfree %s:<%d> %p\n", fname, lineno, ptr);
+    if (!ptr) {
+        fprintf(stderr, "Attempt to free symmetric heap null pointer in file %s, line %d\n", fname, lineno);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    shfree(ptr);
+}

@@ -33,7 +33,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, void *buf, int count,
 	 * Scientific Programming, (5)4:301--317, Winter 1996.
 	 * http://www.mcs.anl.gov/home/thakur/ext2ph.ps
 	 */
-	printf("in my code!!!");
 	int i, filetype_is_contig, nprocs, myrank, do_collect = 0;
 	int contig_access_count = 0, buftype_is_contig, interleave_count = 0;
 	ADIO_Offset orig_fp, start_offset, end_offset, off, min_offset, max_offset;

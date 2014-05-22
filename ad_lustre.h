@@ -42,6 +42,15 @@
 #endif
 #endif /* End of HAVE_SYS_AIO_H */
 
+/* TODO: does the following type definition belong here? */
+struct req_info {
+	void *source;
+	ADIO_Offset length;
+	int aggregator_index;
+	int stripe_num;
+	int relative_offset;
+};
+
 void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code);
 void ADIOI_LUSTRE_Close(ADIO_File fd, int *error_code);
 void ADIOI_LUSTRE_ReadContig(ADIO_File fd, void *buf, int count,
@@ -74,22 +83,24 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code);
 
 /* the lustre utilities: */
 int ADIOI_LUSTRE_Docollect(ADIO_File fd, int contig_access_count,
-			   ADIO_Offset *len_list, int nprocs);
+                           ADIO_Offset *len_list);
 
 void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd,
                                     ADIO_Offset **striping_info_ptr,
                                     int mode, ADIO_Offset min_offset,
                                     ADIO_Offset max_offset);
 void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset *offset_list,
-			      ADIO_Offset *len_list, int contig_access_count,
-			      ADIO_Offset *striping_info, int nprocs,
-                     int *count_my_req_procs_ptr,
-			      int **count_my_req_per_proc_ptr,
-			      ADIOI_Access **my_req_ptr,
-			      int ***buf_idx_ptr);
+                              ADIO_Offset *len_list, int contig_access_count,
+                              ADIO_Offset *striping_info,
+                              void *buf, int buftype_is_contig,
+                              MPI_Datatype datatype, int count,
+                              struct req_info **req_info_ptr,
+                              int *req_info_count);
 
 int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off,
                                  ADIO_Offset *len, ADIO_Offset *striping_info);
+void ADIOI_LUSTRE_Calc_stripe(ADIO_Offset off, ADIO_Offset *striping_info,
+                              int *stripe_num, int *rel_offset);
 void ADIOI_LUSTRE_IwriteContig(ADIO_File fd, void *buf, int count,
                                MPI_Datatype datatype, int file_ptr_type,
                                ADIO_Offset offset, ADIO_Request *request,

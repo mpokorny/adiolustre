@@ -9,7 +9,6 @@
  */
 
 #include "ad_lustre.h"
-#include <shmem.h>
 
 /* what is the basis for this define?
  * what happens if there are more than 1k UUIDs? */
@@ -26,8 +25,6 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 #if defined(MPICH2) || !defined(PRINT_ERR_MSG)
 	static char myname[] = "ADIOI_LUSTRE_OPEN";
 #endif
-
-	start_pes(0);
 
 	if (fd->perm == ADIO_PERM_NULL) {
 		old_mask = umask(022);
